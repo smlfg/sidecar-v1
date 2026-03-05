@@ -1,0 +1,17 @@
+[Unit]
+Description=Voice Bridge for Claude Code (STT → wtype)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/smlflg/Projekte/Sidecar/voice_bridge.py
+Restart=on-failure
+RestartSec=5
+Environment=WHISPER_MODEL=medium
+Environment=WHISPER_LANGUAGE=de
+Environment=CHIME_ENABLED=true
+Environment=VOICE_BRIDGE_PIPE=/tmp/voice-bridge-trigger
+Environment=VOICE_BRIDGE_LOG=/tmp/voice-bridge.log
+
+[Install]
+WantedBy=default.target

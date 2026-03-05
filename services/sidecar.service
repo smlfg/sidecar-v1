@@ -1,0 +1,14 @@
+[Unit]
+Description=Claude Code Sidecar Daemon (Pattern Detection + Context Externalization)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/smlflg/Projekte/Sidecar/sidecar.py
+Restart=on-failure
+RestartSec=5
+Environment=SIDECAR_SOCKET=/tmp/claude-sidecar.sock
+Environment=SIDECAR_LOG=/tmp/claude-sidecar.log
+
+[Install]
+WantedBy=default.target

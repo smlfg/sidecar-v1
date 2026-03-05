@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""sidecar-ctl — CLI for the Claude Sidecar Agent Control Panel"""
+
+import argparse
+import json
+import socket
+import sys
+from datetime import datetime
+from pathlib import Path
+
+SOCKET_PATH = "/tmp/claude-sidecar.sock"
+LOG_PATH = "/tmp/claude-sidecar.log"
+
+
+def _send_command(cmd_data: dict) -> dict:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(3.0)
+    try:
+        sock.connect(SOCKET_PATH)
+    except (FileNotFoundError, ConnectionRefusedError):
+        print("Error: Sidecar daemon is not running (socket not found at {})".format(SOCKET_PATH))
+        sys.exit(1)
+    cmd_data["_type"] = "cmd"
+    sock.sendall(json.dumps(cmd_data).encode())
+    chunks = []
+    while True:
+        try:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        except socket.timeout:
+            break
+    sock.close()
+    raw = b"".join(chunks).decode()
+    if not raw:
+        print("Error: Empty response from daemon")
+        sys.exit(1)
+    return json.loads(raw)
+
+
+def _separator(width: int) -> str:
+    return "\u2500" * width
+
+
+def cmd_status(args):
+    resp = _send_command({"cmd": "status"})
+    print("Status:      {}".format(resp.get("status", "unknown")))
+    print("PID:         {}".format(resp.get("pid", "—")))
+    uptime_s = resp.get("uptime_s", 0)
+    if uptime_s:
+        mins, secs = divmod(uptime_s, 60)
+        hrs, mins = divmod(mins, 60)
+        print("Uptime:      {}h {}m {}s".format(hrs, mins, secs))
+    else:
+        print("Uptime:      —")
+    print("Rules:       {}".format(resp.get("rule_count", 0)))
+    print("Findings:    {}".format(resp.get("total_findings", 0)))
+    companions = resp.get("companions_loaded", False)
+    print("Companions:  {}".format("loaded" if companions else "not loaded"))
+    print("Patterns:    {}".format(resp.get("patterns", 0)))
+    print("Skills:      {}".format(resp.get("skill_triggers", 0)))
+    print("Plugins:     {}".format(resp.get("plugins", 0)))
+
+
+def cmd_rules(args):
+    payload = {"cmd": "rules"}
+    if args.group:
+        payload["group"] = args.group
+    resp = _send_command(payload)
+    rules = resp.get("rules", [])
+
+    col_name = 22
+    col_group = 14
+    col_enabled = 8
+    col_severity = 10
+    col_fires = 6
+    col_last = 8
+
+    header = (
+        "Name".ljust(col_name)
+        + "Group".ljust(col_group)
+        + "Enabled".ljust(col_enabled)
+        + "Severity".ljust(col_severity)
+        + "Fires".rjust(col_fires)
+        + "  Last".ljust(col_last)
+    )
+    total_width = col_name + col_group + col_enabled + col_severity + col_fires + col_last + 2
+    print(header)
+    print(_separator(total_width))
+
+    if not rules:
+        print("(no rules)")
+        return
+
+    for rule in rules:
+        name = str(rule.get("name", "")).ljust(col_name)
+        group = str(rule.get("group", "")).ljust(col_group)
+        enabled = ("\u2713" if rule.get("enabled", True) else "\u2717").ljust(col_enabled)
+        snoozed = rule.get("snoozed", False)
+        if snoozed:
+            enabled = "S".ljust(col_enabled)
+        severity = str(rule.get("severity", "")).ljust(col_severity)
+        fires = str(rule.get("fires", 0)).rjust(col_fires)
+        last_fired = rule.get("last_fired")
+        if last_fired:
+            # Try to parse and format as HH:MM
+            try:
+                ts = datetime.fromisoformat(last_fired)
+                last = ts.strftime("%H:%M")
+            except (ValueError, TypeError):
+                last = str(last_fired)
+        else:
+            last = "\u2014"
+        last = ("  " + last).ljust(col_last)
+        print(name + group + enabled + severity + fires + last)
+
+
+def cmd_enable(args):
+    resp = _send_command({"cmd": "enable", "name": args.name})
+    print(resp.get("message", "Enabled: {}".format(args.name)))
+
+
+def cmd_disable(args):
+    resp = _send_command({"cmd": "disable", "name": args.name})
+    print(resp.get("message", "Disabled: {}".format(args.name)))
+
+
+def cmd_snooze(args):
+    minutes = args.minutes if args.minutes is not None else 30
+    resp = _send_command({"cmd": "snooze", "name": args.name, "minutes": minutes})
+    print(resp.get("message", "Snoozed {} for {} min".format(args.name, minutes)))
+
+
+def cmd_sessions(args):
+    resp = _send_command({"cmd": "sessions"})
+    sessions = resp.get("sessions", [])
+
+    col_id = 16
+    col_start = 20
+    col_msgs = 8
+    col_findings = 10
+    col_status = 10
+
+    header = (
+        "ID".ljust(col_id)
+        + "Started".ljust(col_start)
+        + "Msgs".rjust(col_msgs)
+        + "Findings".rjust(col_findings)
+        + "  Status".ljust(col_status)
+    )
+    total_width = col_id + col_start + col_msgs + col_findings + col_status + 2
+    print(header)
+    print(_separator(total_width))
+
+    if not sessions:
+        print("(no sessions)")
+        return
+
+    for s in sessions:
+        sid = str(s.get("id", "")).ljust(col_id)
+        started = str(s.get("started", "—")).ljust(col_start)
+        msgs = str(s.get("messages", 0)).rjust(col_msgs)
+        findings = str(s.get("findings", 0)).rjust(col_findings)
+        status = ("  " + str(s.get("status", ""))).ljust(col_status)
+        print(sid + started + msgs + findings + status)
+
+
+def cmd_session(args):
+    resp = _send_command({"cmd": "session", "id": args.id})
+    session = resp.get("session", resp)
+    if not session:
+        print("Session not found: {}".format(args.id))
+        return
+    for key, val in session.items():
+        print("{:<20} {}".format(key + ":", val))
+
+
+def cmd_findings(args):
+    resp = _send_command({"cmd": "findings"})
+    findings = resp.get("findings", [])
+
+    col_time = 8
+    col_rule = 22
+    col_severity = 10
+    col_session = 14
+    col_msg = 40
+
+    header = (
+        "Time".ljust(col_time)
+        + "  Rule".ljust(col_rule)
+        + "Severity".ljust(col_severity)
+        + "Session".ljust(col_session)
+        + "Message".ljust(col_msg)
+    )
+    total_width = col_time + col_rule + col_severity + col_session + col_msg + 2
+    print(header)
+    print(_separator(total_width))
+
+    if not findings:
+        print("(no findings)")
+        return
+
+    for f in findings:
+        ts = f.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(ts)
+            time_str = dt.strftime("%H:%M")
+        except (ValueError, TypeError):
+            time_str = str(ts)[:8]
+        time_col = time_str.ljust(col_time)
+        rule = ("  " + str(f.get("rule", ""))).ljust(col_rule)
+        severity = str(f.get("severity", "")).ljust(col_severity)
+        session = str(f.get("session", "")).ljust(col_session)
+        message = str(f.get("message", ""))[:col_msg - 1].ljust(col_msg)
+        print(time_col + rule + severity + session + message)
+
+
+def cmd_reload(args):
+    resp = _send_command({"cmd": "reload"})
+    print(resp.get("message", "Reload triggered."))
+
+
+def cmd_log(args):
+    lines = args.lines if args.lines is not None else 20
+    log_file = Path(LOG_PATH)
+    if not log_file.exists():
+        print("Log file not found: {}".format(LOG_PATH))
+        return
+    all_lines = log_file.read_text().splitlines()
+    for line in all_lines[-lines:]:
+        print(line)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="sidecar-ctl",
+        description="CLI for the Claude Sidecar Agent Control Panel"
+    )
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    # status
+    subparsers.add_parser("status", help="Show daemon status")
+
+    # rules
+    p_rules = subparsers.add_parser("rules", help="List rules")
+    p_rules.add_argument("--group", help="Filter by group")
+
+    # enable
+    p_enable = subparsers.add_parser("enable", help="Enable a rule")
+    p_enable.add_argument("name", help="Rule name")
+
+    # disable
+    p_disable = subparsers.add_parser("disable", help="Disable a rule")
+    p_disable.add_argument("name", help="Rule name")
+
+    # snooze
+    p_snooze = subparsers.add_parser("snooze", help="Snooze a rule")
+    p_snooze.add_argument("name", help="Rule name")
+    p_snooze.add_argument("minutes", nargs="?", type=int, default=None, help="Minutes (default 30)")
+
+    # sessions
+    subparsers.add_parser("sessions", help="List sessions")
+
+    # session
+    p_session = subparsers.add_parser("session", help="Show session details")
+    p_session.add_argument("id", help="Session ID")
+
+    # findings
+    subparsers.add_parser("findings", help="Show last 50 findings")
+
+    # reload
+    subparsers.add_parser("reload", help="Reload daemon config")
+
+    # log
+    p_log = subparsers.add_parser("log", help="Show last N lines from sidecar log")
+    p_log.add_argument("--lines", "-n", type=int, default=None, help="Number of lines (default 20)")
+
+    args = parser.parse_args()
+
+    dispatch = {
+        "status": cmd_status,
+        "rules": cmd_rules,
+        "enable": cmd_enable,
+        "disable": cmd_disable,
+        "snooze": cmd_snooze,
+        "sessions": cmd_sessions,
+        "session": cmd_session,
+        "findings": cmd_findings,
+        "reload": cmd_reload,
+        "log": cmd_log,
+    }
+
+    try:
+        dispatch[args.subcommand](args)
+    except json.JSONDecodeError as e:
+        print("Error: Invalid JSON response from daemon: {}".format(e))
+        sys.exit(1)
+    except OSError as e:
+        print("Error: {}".format(e))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
